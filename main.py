@@ -68,9 +68,9 @@ def run_scan():
     print(f"Scan complete. Signals found: {len(signals)}")
     print("-----------------------------------")
 
-print("🐢 Turtle Trade Scanner Started")
+print("🐢 Turtle Trade Scanner Started - VERSION 2", flush=True)
 
 while True:
     run_scan()
-    print("Sleeping for 24 hours...")
-    time.sleep(86400)
+    print("Sleeping for 5 minutes...", flush=True)
+    time.sleep(300)
