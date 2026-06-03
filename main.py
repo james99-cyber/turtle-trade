@@ -1,7 +1,6 @@
 import time
 from datetime import datetime
 import yfinance as yf
-import pandas as pd
 
 TICKERS = [
     "SPY", "QQQ", "GLD", "SLV",
@@ -10,17 +9,29 @@ TICKERS = [
     "JPM", "V", "MA", "UNH", "LLY", "XOM"
 ]
 
+def to_float(value):
+    try:
+        return float(value.iloc[0])
+    except Exception:
+        return float(value)
+
 def scan_ticker(ticker):
-    data = yf.download(ticker, period="1y", interval="1d", progress=False)
+    data = yf.download(
+        ticker,
+        period="1y",
+        interval="1d",
+        progress=False,
+        auto_adjust=True
+    )
 
     if data.empty or len(data) < 220:
         return None
 
-    close = data["Close"].iloc[-1]
-    high_20 = data["High"].iloc[-21:-1].max()
-    high_55 = data["High"].iloc[-56:-1].max()
-    low_10 = data["Low"].iloc[-11:-1].min()
-    ma_200 = data["Close"].rolling(200).mean().iloc[-1]
+    close = to_float(data["Close"].iloc[-1])
+    high_20 = to_float(data["High"].iloc[-21:-1].max())
+    high_55 = to_float(data["High"].iloc[-56:-1].max())
+    low_10 = to_float(data["Low"].iloc[-11:-1].min())
+    ma_200 = to_float(data["Close"].rolling(200).mean().iloc[-1])
 
     if close > high_55 and close > ma_200:
         return f"🐢 STRONG BUY: {ticker} | 55-day breakout | Price: {close:.2f}"
@@ -43,11 +54,13 @@ def run_scan():
     for ticker in TICKERS:
         try:
             signal = scan_ticker(ticker)
+
             if signal:
                 signals.append(signal)
                 print(signal)
             else:
                 print(f"No signal: {ticker}")
+
         except Exception as e:
             print(f"Error scanning {ticker}: {e}")
 
@@ -59,6 +72,5 @@ print("🐢 Turtle Trade Scanner Started")
 
 while True:
     run_scan()
-
     print("Sleeping for 24 hours...")
     time.sleep(86400)
