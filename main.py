@@ -9,11 +9,8 @@ TICKERS = [
     "JPM", "V", "MA", "UNH", "LLY", "XOM"
 ]
 
-def to_float(value):
-    try:
-        return float(value.iloc[0])
-    except Exception:
-        return float(value)
+def latest_number(series):
+    return float(series.squeeze())
 
 def scan_ticker(ticker):
     data = yf.download(
@@ -27,11 +24,11 @@ def scan_ticker(ticker):
     if data.empty or len(data) < 220:
         return None
 
-    close = to_float(data["Close"].iloc[-1])
-    high_20 = to_float(data["High"].iloc[-21:-1].max())
-    high_55 = to_float(data["High"].iloc[-56:-1].max())
-    low_10 = to_float(data["Low"].iloc[-11:-1].min())
-    ma_200 = to_float(data["Close"].rolling(200).mean().iloc[-1])
+    close = latest_number(data["Close"].iloc[-1])
+    high_20 = latest_number(data["High"].iloc[-21:-1].max())
+    high_55 = latest_number(data["High"].iloc[-56:-1].max())
+    low_10 = latest_number(data["Low"].iloc[-11:-1].min())
+    ma_200 = latest_number(data["Close"].rolling(200).mean().iloc[-1])
 
     if close > high_55 and close > ma_200:
         return f"🐢 STRONG BUY: {ticker} | 55-day breakout | Price: {close:.2f}"
@@ -45,9 +42,9 @@ def scan_ticker(ticker):
     return None
 
 def run_scan():
-    print("===================================")
-    print(f"🐢 Turtle Trade Scan: {datetime.now()}")
-    print("===================================")
+    print("===================================", flush=True)
+    print(f"🐢 Turtle Trade Scan: {datetime.now()}", flush=True)
+    print("===================================", flush=True)
 
     signals = []
 
@@ -57,18 +54,18 @@ def run_scan():
 
             if signal:
                 signals.append(signal)
-                print(signal)
+                print(signal, flush=True)
             else:
-                print(f"No signal: {ticker}")
+                print(f"No signal: {ticker}", flush=True)
 
         except Exception as e:
-            print(f"Error scanning {ticker}: {e}")
+            print(f"Error scanning {ticker}: {e}", flush=True)
 
-    print("-----------------------------------")
-    print(f"Scan complete. Signals found: {len(signals)}")
-    print("-----------------------------------")
+    print("-----------------------------------", flush=True)
+    print(f"Scan complete. Signals found: {len(signals)}", flush=True)
+    print("-----------------------------------", flush=True)
 
-print("🐢 Turtle Trade Scanner Started - VERSION 2", flush=True)
+print("🐢 Turtle Trade Scanner Started - VERSION 3", flush=True)
 
 while True:
     run_scan()
