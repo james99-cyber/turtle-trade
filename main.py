@@ -3,17 +3,51 @@ import os
 import time
 from datetime import datetime, timezone, timedelta
 
+import pandas as pd
 import yfinance as yf
 
 
-TICKERS = [
-    "SPY", "QQQ", "GLD", "SLV",
-    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL",
-    "TSLA", "AMD", "AVGO", "PLTR", "NFLX", "COST",
-    "JPM", "V", "MA", "UNH", "LLY", "XOM"
+SIGNAL_HISTORY_FILE = "signal_history.json"
+
+EXTRA_ETFS = [
+    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "HYG", "XLF", "XLK",
+    "XLE", "XLV", "XLY", "XLI", "XLP", "XLU", "XLB", "XLRE", "SMH", "ARKK"
 ]
 
-SIGNAL_HISTORY_FILE = "signal_history.json"
+
+def get_market_tickers():
+    tickers = set(EXTRA_ETFS)
+
+    try:
+        sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+        tickers.update(sp500["Symbol"].tolist())
+        print(f"Loaded S&P 500: {len(sp500)} symbols", flush=True)
+    except Exception as error:
+        print(f"Could not load S&P 500 list: {error}", flush=True)
+
+    try:
+        nasdaq_tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
+        nasdaq_100 = None
+
+        for table in nasdaq_tables:
+            if "Ticker" in table.columns:
+                nasdaq_100 = table
+                break
+
+        if nasdaq_100 is not None:
+            tickers.update(nasdaq_100["Ticker"].tolist())
+            print(f"Loaded Nasdaq 100: {len(nasdaq_100)} symbols", flush=True)
+
+    except Exception as error:
+        print(f"Could not load Nasdaq 100 list: {error}", flush=True)
+
+    clean_tickers = sorted([
+        str(ticker).replace(".", "-").strip()
+        for ticker in tickers
+        if isinstance(ticker, str) and ticker.strip()
+    ])
+
+    return clean_tickers
 
 
 def load_signal_history():
@@ -129,16 +163,19 @@ def run_scan():
     print(f"Run time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", flush=True)
     print("===================================", flush=True)
 
+    tickers = get_market_tickers()
     history = load_signal_history()
+
     new_signals = []
     total_signals = 0
 
-    for ticker in TICKERS:
+    print(f"Scanning {len(tickers)} tickers...", flush=True)
+
+    for ticker in tickers:
         try:
             signals = scan_ticker(ticker)
 
             if not signals:
-                print(f"No signal: {ticker}", flush=True)
                 continue
 
             for signal in signals:
@@ -152,13 +189,15 @@ def run_scan():
                 else:
                     print(f"Already recorded: {signal['ticker']} {signal['system']} {signal['type']}", flush=True)
 
+            time.sleep(0.2)
+
         except Exception as error:
             print(f"Error scanning {ticker}: {error}", flush=True)
 
     save_signal_history(history)
 
     print("-----------------------------------", flush=True)
-    print(f"Stocks scanned: {len(TICKERS)}", flush=True)
+    print(f"Stocks scanned: {len(tickers)}", flush=True)
     print(f"Total signals found today: {total_signals}", flush=True)
     print(f"New signals recorded: {len(new_signals)}", flush=True)
     print("-----------------------------------", flush=True)
@@ -174,7 +213,7 @@ def seconds_until_next_scan():
     return max(60, int((target - now).total_seconds()))
 
 
-print("🐢 Turtle Trade Scanner Started - PURE TURTLE RULES V2", flush=True)
+print("🐢 Turtle Trade Scanner Started - S&P 500 + NASDAQ 100", flush=True)
 
 run_scan()
 
