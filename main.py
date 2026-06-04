@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import yfinance as yf
 
@@ -49,14 +49,13 @@ def scan_ticker(ticker):
         return []
 
     close = get_number(data["Close"].iloc[-1])
+    candle_date = data.index[-1].strftime("%Y-%m-%d")
 
     high_20 = get_number(data["High"].iloc[-21:-1].max())
     high_55 = get_number(data["High"].iloc[-56:-1].max())
 
     low_10 = get_number(data["Low"].iloc[-11:-1].min())
     low_20 = get_number(data["Low"].iloc[-21:-1].min())
-
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     signals = []
 
@@ -66,9 +65,9 @@ def scan_ticker(ticker):
             "system": "SYSTEM 1",
             "type": "BUY",
             "rule": "20-day high breakout",
-            "price": round(close, 2),
-            "level": round(high_20, 2),
-            "date": today
+            "daily_close": round(close, 2),
+            "breakout_level": round(high_20, 2),
+            "candle_date": candle_date
         })
 
     if close < low_10:
@@ -77,9 +76,9 @@ def scan_ticker(ticker):
             "system": "SYSTEM 1",
             "type": "SELL",
             "rule": "10-day low breakout",
-            "price": round(close, 2),
-            "level": round(low_10, 2),
-            "date": today
+            "daily_close": round(close, 2),
+            "breakout_level": round(low_10, 2),
+            "candle_date": candle_date
         })
 
     if close > high_55:
@@ -88,9 +87,9 @@ def scan_ticker(ticker):
             "system": "SYSTEM 2",
             "type": "BUY",
             "rule": "55-day high breakout",
-            "price": round(close, 2),
-            "level": round(high_55, 2),
-            "date": today
+            "daily_close": round(close, 2),
+            "breakout_level": round(high_55, 2),
+            "candle_date": candle_date
         })
 
     if close < low_20:
@@ -99,16 +98,16 @@ def scan_ticker(ticker):
             "system": "SYSTEM 2",
             "type": "SELL",
             "rule": "20-day low breakout",
-            "price": round(close, 2),
-            "level": round(low_20, 2),
-            "date": today
+            "daily_close": round(close, 2),
+            "breakout_level": round(low_20, 2),
+            "candle_date": candle_date
         })
 
     return signals
 
 
 def signal_key(signal):
-    return f"{signal['date']}|{signal['ticker']}|{signal['system']}|{signal['type']}|{signal['rule']}"
+    return f"{signal['candle_date']}|{signal['ticker']}|{signal['system']}|{signal['type']}|{signal['rule']}"
 
 
 def print_signal(signal):
@@ -118,9 +117,9 @@ def print_signal(signal):
     print(f"{emoji} 🐢 {signal['system']} {signal['type']}", flush=True)
     print(f"Ticker: {signal['ticker']}", flush=True)
     print(f"Rule: {signal['rule']}", flush=True)
-    print(f"Price: {signal['price']}", flush=True)
-    print(f"Breakout Level: {signal['level']}", flush=True)
-    print(f"Date: {signal['date']}", flush=True)
+    print(f"Daily Close: {signal['daily_close']}", flush=True)
+    print(f"Breakout Level: {signal['breakout_level']}", flush=True)
+    print(f"Candle Date: {signal['candle_date']}", flush=True)
     print("", flush=True)
 
 
@@ -166,18 +165,16 @@ def run_scan():
 
 
 def seconds_until_next_scan():
-    # Runs once per day at 22:15 UTC.
-    # This is after the normal US market close.
     now = datetime.now(timezone.utc)
     target = now.replace(hour=22, minute=15, second=0, microsecond=0)
 
     if now >= target:
-        target = target.replace(day=target.day + 1)
+        target = target + timedelta(days=1)
 
     return max(60, int((target - now).total_seconds()))
 
 
-print("🐢 Turtle Trade Scanner Started - PURE TURTLE RULES", flush=True)
+print("🐢 Turtle Trade Scanner Started - PURE TURTLE RULES V2", flush=True)
 
 run_scan()
 
