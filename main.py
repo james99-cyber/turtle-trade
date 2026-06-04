@@ -2,42 +2,70 @@ import json
 import os
 import time
 from datetime import datetime, timezone, timedelta
+from io import StringIO
 
 import pandas as pd
+import requests
 import yfinance as yf
 
 
 SIGNAL_HISTORY_FILE = "signal_history.json"
+UNIVERSE_CACHE_FILE = "universe_cache.json"
 
 EXTRA_ETFS = [
-    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "HYG", "XLF", "XLK",
-    "XLE", "XLV", "XLY", "XLI", "XLP", "XLU", "XLB", "XLRE", "SMH", "ARKK"
+    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT",
+    "XLF", "XLK", "XLE", "XLV", "XLY", "XLI", "XLP",
+    "XLU", "XLB", "XLRE", "SMH"
 ]
+
+
+def fetch_html_tables(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 TurtleTradeBot/1.0"
+    }
+    response = requests.get(url, headers=headers, timeout=20)
+    response.raise_for_status()
+    return pd.read_html(StringIO(response.text))
+
+
+def load_cached_universe():
+    if not os.path.exists(UNIVERSE_CACHE_FILE):
+        return []
+
+    try:
+        with open(UNIVERSE_CACHE_FILE, "r") as file:
+            cache = json.load(file)
+            return cache.get("tickers", [])
+    except Exception:
+        return []
+
+
+def save_universe(tickers):
+    with open(UNIVERSE_CACHE_FILE, "w") as file:
+        json.dump({
+            "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            "tickers": tickers
+        }, file, indent=2)
 
 
 def get_market_tickers():
     tickers = set(EXTRA_ETFS)
 
     try:
-        sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+        sp500_tables = fetch_html_tables("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+        sp500 = sp500_tables[0]
         tickers.update(sp500["Symbol"].tolist())
         print(f"Loaded S&P 500: {len(sp500)} symbols", flush=True)
     except Exception as error:
         print(f"Could not load S&P 500 list: {error}", flush=True)
 
     try:
-        nasdaq_tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
-        nasdaq_100 = None
-
+        nasdaq_tables = fetch_html_tables("https://en.wikipedia.org/wiki/Nasdaq-100")
         for table in nasdaq_tables:
             if "Ticker" in table.columns:
-                nasdaq_100 = table
+                tickers.update(table["Ticker"].tolist())
+                print(f"Loaded Nasdaq 100: {len(table)} symbols", flush=True)
                 break
-
-        if nasdaq_100 is not None:
-            tickers.update(nasdaq_100["Ticker"].tolist())
-            print(f"Loaded Nasdaq 100: {len(nasdaq_100)} symbols", flush=True)
-
     except Exception as error:
         print(f"Could not load Nasdaq 100 list: {error}", flush=True)
 
@@ -47,7 +75,17 @@ def get_market_tickers():
         if isinstance(ticker, str) and ticker.strip()
     ])
 
-    return clean_tickers
+    if len(clean_tickers) > len(EXTRA_ETFS):
+        save_universe(clean_tickers)
+        return clean_tickers
+
+    cached = load_cached_universe()
+    if cached:
+        print(f"Using cached universe: {len(cached)} symbols", flush=True)
+        return cached
+
+    print("Using ETF fallback only", flush=True)
+    return sorted(EXTRA_ETFS)
 
 
 def load_signal_history():
@@ -175,9 +213,6 @@ def run_scan():
         try:
             signals = scan_ticker(ticker)
 
-            if not signals:
-                continue
-
             for signal in signals:
                 total_signals += 1
                 key = signal_key(signal)
@@ -186,10 +221,8 @@ def run_scan():
                     history[key] = signal
                     new_signals.append(signal)
                     print_signal(signal)
-                else:
-                    print(f"Already recorded: {signal['ticker']} {signal['system']} {signal['type']}", flush=True)
 
-            time.sleep(0.2)
+            time.sleep(0.15)
 
         except Exception as error:
             print(f"Error scanning {ticker}: {error}", flush=True)
@@ -213,7 +246,7 @@ def seconds_until_next_scan():
     return max(60, int((target - now).total_seconds()))
 
 
-print("🐢 Turtle Trade Scanner Started - S&P 500 + NASDAQ 100", flush=True)
+print("🐢 Turtle Trade Scanner Started - LIVE UNIVERSE", flush=True)
 
 run_scan()
 
