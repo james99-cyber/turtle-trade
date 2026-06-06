@@ -20,32 +20,6 @@ EXTRA_ETFS = [
     "XLU", "XLB", "XLRE", "SMH"
 ]
 
-SECTOR_MAP = {
-    "XLK": "Technology",
-    "XLF": "Financials",
-    "XLE": "Energy",
-    "XLV": "Healthcare",
-    "XLY": "Consumer Discretionary",
-    "XLI": "Industrials",
-    "XLP": "Consumer Staples",
-    "XLU": "Utilities",
-    "XLB": "Materials",
-    "XLRE": "Real Estate"
-}
-
-YAHOO_SECTOR_TO_ETF = {
-    "Technology": "XLK",
-    "Financial Services": "XLF",
-    "Energy": "XLE",
-    "Healthcare": "XLV",
-    "Consumer Cyclical": "XLY",
-    "Industrials": "XLI",
-    "Consumer Defensive": "XLP",
-    "Utilities": "XLU",
-    "Basic Materials": "XLB",
-    "Real Estate": "XLRE",
-}
-
 
 def fetch_html_tables(url):
     headers = {"User-Agent": "Mozilla/5.0 TurtleTradeBot/1.0"}
@@ -167,148 +141,7 @@ def get_spy_12m_return():
         return None
 
 
-def get_sector_returns():
-    sector_returns = {}
-
-    for etf in SECTOR_MAP:
-        try:
-            data = yf.download(
-                etf,
-                period="4mo",
-                interval="1d",
-                progress=False,
-                auto_adjust=True
-            )
-
-            if data.empty or len(data) < 63:
-                continue
-
-            closes = data["Close"].squeeze()
-            start = float(closes.iloc[-63])
-            end = float(closes.iloc[-1])
-
-            if start > 0:
-                sector_returns[etf] = (end - start) / start
-
-            time.sleep(0.1)
-
-        except Exception:
-            pass
-
-    return sector_returns
-
-
-def get_ticker_sector_etf(ticker):
-    try:
-        info = yf.Ticker(ticker).info
-        sector = info.get("sector", "")
-        return YAHOO_SECTOR_TO_ETF.get(sector)
-    except Exception:
-        return None
-
-
-def score_buy_signal(signal, data, spy_12m_return, sector_returns):
-    score = 0
-    breakdown = []
-
-    close = signal["daily_close"]
-    closes = data["Close"].squeeze()
-    highs = data["High"].squeeze()
-    volumes = data["Volume"].squeeze()
-
-    if signal["system"] == "SYSTEM 2":
-        score += 30
-        breakdown.append("55-day breakout +30")
-    else:
-        score += 10
-        breakdown.append("20-day breakout +10")
-
-    if len(closes) >= 200:
-        ma200 = float(closes.iloc[-200:].mean())
-        if close > ma200:
-            score += 15
-            breakdown.append("above 200 MA +15")
-
-    if len(closes) >= 50:
-        ma50 = float(closes.iloc[-50:].mean())
-        if close > ma50:
-            score += 10
-            breakdown.append("above 50 MA +10")
-
-    if len(highs) >= 252:
-        high_52w = float(highs.iloc[-252:].max())
-    else:
-        high_52w = float(highs.max())
-
-    if close >= high_52w * 0.99:
-        score += 15
-        breakdown.append("near/new 52-week high +15")
-
-    if spy_12m_return is not None and len(closes) >= 252:
-        stock_start = float(closes.iloc[-252])
-
-        if stock_start > 0:
-            stock_12m_return = (close - stock_start) / stock_start
-            rs_diff = stock_12m_return - spy_12m_return
-
-            if rs_diff >= 0.30:
-                score += 20
-                breakdown.append(f"relative strength vs SPY +{round(rs_diff * 100, 1)}% +20")
-            elif rs_diff >= 0.15:
-                score += 15
-                breakdown.append(f"relative strength vs SPY +{round(rs_diff * 100, 1)}% +15")
-            elif rs_diff >= 0.05:
-                score += 10
-                breakdown.append(f"relative strength vs SPY +{round(rs_diff * 100, 1)}% +10")
-            elif rs_diff >= 0:
-                score += 5
-                breakdown.append(f"relative strength vs SPY +{round(rs_diff * 100, 1)}% +5")
-
-    if len(volumes) >= 20:
-        avg_volume_20 = float(volumes.iloc[-20:].mean())
-        today_volume = float(volumes.iloc[-1])
-
-        if avg_volume_20 > 0 and today_volume >= avg_volume_20 * 1.5:
-            score += 10
-            breakdown.append(f"volume surge {round(today_volume / avg_volume_20, 1)}x +10")
-
-    if sector_returns:
-        sector_etf = get_ticker_sector_etf(signal["ticker"])
-
-        if sector_etf and sector_etf in sector_returns:
-            sorted_sector_returns = sorted(sector_returns.values(), reverse=True)
-
-            top3_threshold = (
-                sorted_sector_returns[2]
-                if len(sorted_sector_returns) >= 3
-                else sorted_sector_returns[-1]
-            )
-
-            if sector_returns[sector_etf] >= top3_threshold:
-                score += 10
-                sector_name = SECTOR_MAP.get(sector_etf, sector_etf)
-                breakdown.append(f"leading sector {sector_name} +10")
-
-    score = min(score, 100)
-
-    if score >= 90:
-        grade = "PRIME"
-        grade_emoji = "🔥"
-    elif score >= 80:
-        grade = "EXCELLENT"
-        grade_emoji = "⭐"
-    else:
-        return None
-
-    return {
-        "score": score,
-        "grade": grade,
-        "grade_emoji": grade_emoji,
-        "breakdown": breakdown,
-    }
-
-
-def scan_ticker(ticker, spy_12m_return, sector_returns):
+def check_prime_turtle_signal(ticker, spy_12m_return):
     data = yf.download(
         ticker,
         period="2y",
@@ -318,75 +151,96 @@ def scan_ticker(ticker, spy_12m_return, sector_returns):
     )
 
     if data.empty or len(data) < 252:
-        return []
+        return None
 
-    close = get_number(data["Close"].iloc[-1])
+    closes = data["Close"].squeeze()
+    highs = data["High"].squeeze()
+    volumes = data["Volume"].squeeze()
+
+    close = float(closes.iloc[-1])
     candle_date = data.index[-1].strftime("%Y-%m-%d")
 
-    high_20 = get_number(data["High"].iloc[-21:-1].max())
-    high_55 = get_number(data["High"].iloc[-56:-1].max())
+    high_55 = float(highs.iloc[-56:-1].max())
+    high_52w = float(highs.iloc[-252:].max())
 
-    actionable_signals = []
+    ma_200 = float(closes.iloc[-200:].mean())
+    ma_50 = float(closes.iloc[-50:].mean())
 
-    turtle_buy_signals = []
+    avg_volume_20 = float(volumes.iloc[-20:].mean())
+    today_volume = float(volumes.iloc[-1])
 
-    if close > high_20:
-        turtle_buy_signals.append({
-            "ticker": ticker,
-            "system": "SYSTEM 1",
-            "type": "BUY",
-            "rule": "20-day high breakout",
-            "daily_close": round(close, 2),
-            "breakout_level": round(high_20, 2),
-            "candle_date": candle_date,
-        })
+    if close <= high_55:
+        return None
 
-    if close > high_55:
-        turtle_buy_signals.append({
-            "ticker": ticker,
-            "system": "SYSTEM 2",
-            "type": "BUY",
-            "rule": "55-day high breakout",
-            "daily_close": round(close, 2),
-            "breakout_level": round(high_55, 2),
-            "candle_date": candle_date,
-        })
+    if close <= ma_200:
+        return None
 
-    for signal in turtle_buy_signals:
-        scoring = score_buy_signal(signal, data, spy_12m_return, sector_returns)
+    if close <= ma_50:
+        return None
 
-        if scoring is None:
-            continue
+    if close < high_52w * 0.99:
+        return None
 
-        signal.update(scoring)
-        actionable_signals.append(signal)
+    if avg_volume_20 <= 0:
+        return None
 
-    return actionable_signals
+    volume_ratio = today_volume / avg_volume_20
+
+    if volume_ratio < 1.5:
+        return None
+
+    if spy_12m_return is None:
+        return None
+
+    stock_start = float(closes.iloc[-252])
+
+    if stock_start <= 0:
+        return None
+
+    stock_12m_return = (close - stock_start) / stock_start
+    rs_diff = stock_12m_return - spy_12m_return
+
+    if rs_diff < 0.15:
+        return None
+
+    return {
+        "ticker": ticker,
+        "type": "PRIME_TURTLE_BUY",
+        "rule": "System 2 55-day breakout with Prime filters",
+        "daily_close": round(close, 2),
+        "breakout_level": round(high_55, 2),
+        "ma_200": round(ma_200, 2),
+        "ma_50": round(ma_50, 2),
+        "high_52w": round(high_52w, 2),
+        "rs_vs_spy": round(rs_diff * 100, 1),
+        "volume_ratio": round(volume_ratio, 2),
+        "candle_date": candle_date,
+    }
 
 
 def signal_key(signal):
-    return f"{signal['candle_date']}|{signal['ticker']}|{signal['system']}|{signal['type']}|{signal['rule']}|{signal['grade']}"
+    return f"{signal['candle_date']}|{signal['ticker']}|{signal['type']}|{signal['rule']}"
 
 
-def print_signal(signal):
+def print_prime_signal(signal):
     print("", flush=True)
-    print(f"🟢 🐢 {signal['system']} BUY", flush=True)
-    print(f"{signal['grade_emoji']} Grade: {signal['grade']} | Score: {signal['score']}/100", flush=True)
+    print("🚨 🐢 PRIME TURTLE SIGNAL", flush=True)
     print(f"Ticker:          {signal['ticker']}", flush=True)
     print(f"Rule:            {signal['rule']}", flush=True)
     print(f"Daily Close:     {signal['daily_close']}", flush=True)
-    print(f"Breakout Level:  {signal['breakout_level']}", flush=True)
+    print(f"55-Day Level:    {signal['breakout_level']}", flush=True)
+    print(f"200 MA:          {signal['ma_200']}", flush=True)
+    print(f"50 MA:           {signal['ma_50']}", flush=True)
+    print(f"52-Week High:    {signal['high_52w']}", flush=True)
+    print(f"RS vs SPY:       +{signal['rs_vs_spy']}%", flush=True)
+    print(f"Volume:          {signal['volume_ratio']}x 20-day avg", flush=True)
     print(f"Candle Date:     {signal['candle_date']}", flush=True)
-
-    if signal.get("breakdown"):
-        print(f"Scoring:         {' | '.join(signal['breakdown'])}", flush=True)
-
     print("", flush=True)
 
 
 def run_scan():
     print("===================================", flush=True)
-    print("🐢 Turtle Trade Scanner - ACTIONABLE ONLY", flush=True)
+    print("🐢 Turtle Trade PRIME Scanner", flush=True)
     print(f"Run time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", flush=True)
     print("===================================", flush=True)
 
@@ -399,44 +253,28 @@ def run_scan():
     if spy_12m_return is not None:
         print(f"SPY 12m return: {round(spy_12m_return * 100, 1)}%", flush=True)
 
-    print("Fetching sector returns...", flush=True)
-    sector_returns = get_sector_returns()
+    print(f"Scanning {len(tickers)} tickers for PRIME signals...", flush=True)
 
-    if sector_returns:
-        top_sector = max(sector_returns, key=sector_returns.get)
-        print(
-            f"Leading sector: {SECTOR_MAP.get(top_sector, top_sector)} "
-            f"({round(sector_returns[top_sector] * 100, 1)}%)",
-            flush=True,
-        )
-
-    prime_count = 0
-    excellent_count = 0
-    new_actionable_signals = []
-    total_actionable_signals = 0
-
-    print(f"Scanning {len(tickers)} tickers...", flush=True)
+    prime_signals = []
+    new_prime_signals = []
 
     for ticker in tickers:
         try:
-            signals = scan_ticker(ticker, spy_12m_return, sector_returns)
+            signal = check_prime_turtle_signal(ticker, spy_12m_return)
 
-            for signal in signals:
-                total_actionable_signals += 1
+            if signal is None:
+                time.sleep(0.1)
+                continue
 
-                if signal["grade"] == "PRIME":
-                    prime_count += 1
-                elif signal["grade"] == "EXCELLENT":
-                    excellent_count += 1
+            prime_signals.append(signal)
+            key = signal_key(signal)
 
-                key = signal_key(signal)
+            if key not in history:
+                history[key] = signal
+                new_prime_signals.append(signal)
+                print_prime_signal(signal)
 
-                if key not in history:
-                    history[key] = signal
-                    new_actionable_signals.append(signal)
-                    print_signal(signal)
-
-            time.sleep(0.15)
+            time.sleep(0.1)
 
         except Exception as error:
             print(f"Error scanning {ticker}: {error}", flush=True)
@@ -444,20 +282,20 @@ def run_scan():
     save_signal_history(history)
 
     print("===================================", flush=True)
-    print(f"Stocks scanned:             {len(tickers)}", flush=True)
-    print(f"Total actionable signals:   {total_actionable_signals}", flush=True)
-    print(f"New actionable signals:     {len(new_actionable_signals)}", flush=True)
-    print("-----------------------------------", flush=True)
-    print(f"🔥 PRIME:                   {prime_count}", flush=True)
-    print(f"⭐ EXCELLENT:               {excellent_count}", flush=True)
+    print(f"Stocks scanned:          {len(tickers)}", flush=True)
+    print(f"Prime signals found:     {len(prime_signals)}", flush=True)
+    print(f"New prime signals:       {len(new_prime_signals)}", flush=True)
     print("===================================", flush=True)
+
+    if len(prime_signals) == 0:
+        print("No PRIME Turtle signals found this scan.", flush=True)
 
 
 def seconds_until_next_scan():
     return SCAN_INTERVAL_SECONDS
 
 
-print("🐢 Turtle Trade Scanner Started - ACTIONABLE ONLY TEST MODE", flush=True)
+print("🐢 Turtle Trade Scanner Started - PRIME ONLY TEST MODE", flush=True)
 
 run_scan()
 
