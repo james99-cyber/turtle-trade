@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from io import StringIO
 
 import pandas as pd
@@ -11,8 +11,6 @@ import yfinance as yf
 
 SIGNAL_HISTORY_FILE = "signal_history.json"
 UNIVERSE_CACHE_FILE = "universe_cache.json"
-
-SCAN_INTERVAL_SECONDS = 600
 
 EXTRA_ETFS = [
     "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT",
@@ -110,10 +108,6 @@ def save_signal_history(history):
         json.dump(history, file, indent=2)
 
 
-def get_number(value):
-    return float(value.squeeze())
-
-
 def get_spy_12m_return():
     try:
         spy = yf.download(
@@ -141,7 +135,7 @@ def get_spy_12m_return():
         return None
 
 
-def check_prime_turtle_signal(ticker, spy_12m_return):
+def check_prime_turtle_signal(ticker, spy_12m_return, diagnostics):
     data = yf.download(
         ticker,
         period="2y",
@@ -172,22 +166,22 @@ def check_prime_turtle_signal(ticker, spy_12m_return):
     if close <= high_55:
         return None
 
+    diagnostics["55_day_breakout"] += 1
+
     if close <= ma_200:
         return None
+
+    diagnostics["above_200_ma"] += 1
 
     if close <= ma_50:
         return None
 
+    diagnostics["above_50_ma"] += 1
+
     if close < high_52w * 0.99:
         return None
 
-    if avg_volume_20 <= 0:
-        return None
-
-    volume_ratio = today_volume / avg_volume_20
-
-    if volume_ratio < 1.5:
-        return None
+    diagnostics["near_52_week_high"] += 1
 
     if spy_12m_return is None:
         return None
@@ -202,6 +196,18 @@ def check_prime_turtle_signal(ticker, spy_12m_return):
 
     if rs_diff < 0.15:
         return None
+
+    diagnostics["rs_above_15"] += 1
+
+    if avg_volume_20 <= 0:
+        return None
+
+    volume_ratio = today_volume / avg_volume_20
+
+    if volume_ratio < 1.5:
+        return None
+
+    diagnostics["volume_above_1_5"] += 1
 
     return {
         "ticker": ticker,
@@ -238,11 +244,20 @@ def print_prime_signal(signal):
     print("", flush=True)
 
 
+def is_weekend():
+    now = datetime.now(timezone.utc)
+    return now.weekday() >= 5
+
+
 def run_scan():
     print("===================================", flush=True)
     print("🐢 Turtle Trade PRIME Scanner", flush=True)
     print(f"Run time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", flush=True)
     print("===================================", flush=True)
+
+    if is_weekend():
+        print("Weekend detected - skipping scan.", flush=True)
+        return
 
     tickers = get_market_tickers()
     history = load_signal_history()
@@ -255,12 +270,21 @@ def run_scan():
 
     print(f"Scanning {len(tickers)} tickers for PRIME signals...", flush=True)
 
+    diagnostics = {
+        "55_day_breakout": 0,
+        "above_200_ma": 0,
+        "above_50_ma": 0,
+        "near_52_week_high": 0,
+        "rs_above_15": 0,
+        "volume_above_1_5": 0,
+    }
+
     prime_signals = []
     new_prime_signals = []
 
     for ticker in tickers:
         try:
-            signal = check_prime_turtle_signal(ticker, spy_12m_return)
+            signal = check_prime_turtle_signal(ticker, spy_12m_return, diagnostics)
 
             if signal is None:
                 time.sleep(0.1)
@@ -283,6 +307,15 @@ def run_scan():
 
     print("===================================", flush=True)
     print(f"Stocks scanned:          {len(tickers)}", flush=True)
+    print("-----------------------------------", flush=True)
+    print("Filter diagnostics:", flush=True)
+    print(f"55-day breakout:         {diagnostics['55_day_breakout']}", flush=True)
+    print(f"Above 200 MA:            {diagnostics['above_200_ma']}", flush=True)
+    print(f"Above 50 MA:             {diagnostics['above_50_ma']}", flush=True)
+    print(f"Near 52-week high:       {diagnostics['near_52_week_high']}", flush=True)
+    print(f"RS vs SPY > 15%:         {diagnostics['rs_above_15']}", flush=True)
+    print(f"Volume > 1.5x avg:       {diagnostics['volume_above_1_5']}", flush=True)
+    print("-----------------------------------", flush=True)
     print(f"Prime signals found:     {len(prime_signals)}", flush=True)
     print(f"New prime signals:       {len(new_prime_signals)}", flush=True)
     print("===================================", flush=True)
@@ -292,15 +325,30 @@ def run_scan():
 
 
 def seconds_until_next_scan():
-    return SCAN_INTERVAL_SECONDS
+    now = datetime.now(timezone.utc)
+
+    target = now.replace(
+        hour=22,
+        minute=15,
+        second=0,
+        microsecond=0
+    )
+
+    if now >= target:
+        target = target + timedelta(days=1)
+
+    while target.weekday() >= 5:
+        target = target + timedelta(days=1)
+
+    return max(60, int((target - now).total_seconds()))
 
 
-print("🐢 Turtle Trade Scanner Started - PRIME ONLY TEST MODE", flush=True)
+print("🐢 Turtle Trade Scanner Started - DAILY PRIME MODE", flush=True)
 
 run_scan()
 
 while True:
     sleep_seconds = seconds_until_next_scan()
-    print(f"Sleeping until next scan in {round(sleep_seconds / 60, 1)} minutes...", flush=True)
+    print(f"Sleeping until next scan in {round(sleep_seconds / 3600, 2)} hours...", flush=True)
     time.sleep(sleep_seconds)
     run_scan()
