@@ -12,10 +12,11 @@ STARTING_BALANCE = 1000
 PAPER_BUY_USD = 100
 SOL_USD_ESTIMATE = 150
 
-MIN_ENTRY_AGE = 15
-MAX_ENTRY_AGE = 30
-MIN_ENTRY_MARKET_CAP = 3_000
-MAX_ENTRY_MARKET_CAP = 15_000
+MIN_ENTRY_AGE = 20
+MAX_ENTRY_AGE = 180
+MIN_ENTRY_MARKET_CAP = 8_000
+MAX_ENTRY_MARKET_CAP = 50_000
+MIN_BUYS_AT_ENTRY = 3
 
 STOP_LOSS = -30
 TAKE_INITIAL_AT = 100
@@ -111,10 +112,9 @@ def get_symbol(data):
 
 
 def current_balance():
-    closed = trade_history.get("closed", [])
     realised = 0
 
-    for trade in closed:
+    for trade in trade_history.get("closed", []):
         pnl = safe_float(trade.get("final_pnl"), 0)
         realised += PAPER_BUY_USD * (pnl / 100)
 
@@ -126,9 +126,8 @@ def unrealised_pnl_usd():
 
     for trade in open_trades.values():
         pnl = safe_float(trade.get("current_pnl"), 0)
-        position_percent = safe_float(trade.get("position_percent"), 100)
-        active_size = PAPER_BUY_USD * (position_percent / 100)
-        total += active_size * (pnl / 100)
+        size = PAPER_BUY_USD * (safe_float(trade.get("position_percent"), 100) / 100)
+        total += size * (pnl / 100)
 
     return total
 
@@ -147,7 +146,7 @@ def print_account_summary(force=False):
 
     realised_balance = current_balance()
     unrealised = unrealised_pnl_usd()
-    total_equity = realised_balance + unrealised
+    equity = realised_balance + unrealised
 
     best = max([safe_float(t.get("final_pnl"), 0) for t in closed], default=0)
     worst = min([safe_float(t.get("final_pnl"), 0) for t in closed], default=0)
@@ -159,7 +158,7 @@ def print_account_summary(force=False):
     print(f"Starting Balance: {money(STARTING_BALANCE)}")
     print(f"Realised Balance: {money(realised_balance)}")
     print(f"Unrealised P&L: {money(unrealised)}")
-    print(f"Estimated Equity: {money(total_equity)}")
+    print(f"Estimated Equity: {money(equity)}")
     print("")
     print(f"Open Trades: {len(open_trades)}")
     print(f"Closed Trades: {len(closed)}")
@@ -172,11 +171,19 @@ def print_account_summary(force=False):
     if open_trades:
         print("")
         print("Open Positions:")
-        for trade in open_trades.values():
+
+        sorted_trades = sorted(
+            open_trades.values(),
+            key=lambda t: safe_float(t.get("current_pnl"), 0),
+            reverse=True
+        )
+
+        for trade in sorted_trades:
             print(
                 f"- {trade['symbol']} | "
-                f"{pct(trade.get('current_pnl', 0))} | "
+                f"Now {pct(trade.get('current_pnl', 0))} | "
                 f"Peak {pct(trade.get('highest_pnl', 0))} | "
+                f"Low {pct(trade.get('lowest_pnl', 0))} | "
                 f"Size {trade.get('position_percent', 100)}%"
             )
 
@@ -371,6 +378,8 @@ def update_open_trade(token):
 def qualifies_for_entry(token):
     age = now() - token["created_at"]
     market_cap = token.get("market_cap", 0)
+    buys = token.get("buys", 0)
+    sells = token.get("sells", 0)
 
     if token["mint"] in already_traded:
         return False
@@ -388,6 +397,12 @@ def qualifies_for_entry(token):
         return False
 
     if market_cap > MAX_ENTRY_MARKET_CAP:
+        return False
+
+    if buys < MIN_BUYS_AT_ENTRY:
+        return False
+
+    if buys <= sells:
         return False
 
     return True
@@ -429,7 +444,7 @@ async def handle_message(message, ws):
 
 async def main():
     print("========================================")
-    print("🚀 PUMP HUNTER v6 STARTED")
+    print("🚀 PUMP HUNTER v7 STARTED")
     print("========================================")
     print("CLEAN DASHBOARD MODE")
     print("Paper trading only. No real buying.")
@@ -437,6 +452,8 @@ async def main():
     print("Entry Rules:")
     print(f"- Age: {MIN_ENTRY_AGE}s to {MAX_ENTRY_AGE}s")
     print(f"- Market Cap: {money(MIN_ENTRY_MARKET_CAP)} to {money(MAX_ENTRY_MARKET_CAP)}")
+    print(f"- Minimum Buys: {MIN_BUYS_AT_ENTRY}")
+    print("- Must have more buys than sells")
     print(f"- Max Open Trades: {MAX_OPEN_TRADES}")
     print("")
     print("Exit Rules:")
