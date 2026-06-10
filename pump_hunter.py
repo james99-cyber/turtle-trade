@@ -5,24 +5,18 @@ from pathlib import Path
 
 import websockets
 
-# ==============================
-# PUMP HUNTER v5
-# DATA COLLECTION MODE
-# ==============================
-
 PUMP_WS = "wss://pumpportal.fun/api/data"
 TRADES_FILE = Path("pump_trades.json")
 
+STARTING_BALANCE = 1000
 PAPER_BUY_USD = 100
 SOL_USD_ESTIMATE = 150
 
-# Aggressive early entry rules
 MIN_ENTRY_AGE = 15
 MAX_ENTRY_AGE = 30
 MIN_ENTRY_MARKET_CAP = 3_000
 MAX_ENTRY_MARKET_CAP = 15_000
 
-# Trade management
 STOP_LOSS = -30
 TAKE_INITIAL_AT = 100
 MOONBAG_TRAIL = 35
@@ -31,15 +25,13 @@ MAX_OPEN_TRADES = 10
 MAX_TRACKED_TOKENS = 500
 
 EVALUATE_EVERY_SECONDS = 3
+SUMMARY_EVERY_SECONDS = 300
 
 tokens = {}
 open_trades = {}
 already_traded = set()
+last_summary_time = 0
 
-
-# ==============================
-# HELPERS
-# ==============================
 
 def now():
     return int(time.time())
@@ -55,10 +47,10 @@ def safe_float(value, default=0.0):
 
 
 def money(value):
-    return f"${value:,.0f}"
+    return f"${value:,.2f}"
 
 
-def percent(value):
+def pct(value):
     return f"{value:.2f}%"
 
 
@@ -67,12 +59,11 @@ def load_history():
         try:
             data = json.loads(TRADES_FILE.read_text())
             if isinstance(data, dict):
-                data.setdefault("closed", [])
                 data.setdefault("opened", [])
+                data.setdefault("closed", [])
                 return data
         except Exception:
             pass
-
     return {"opened": [], "closed": []}
 
 
@@ -83,22 +74,18 @@ def save_history():
 trade_history = load_history()
 
 
-# ==============================
-# PUMPPORTAL DATA
-# ==============================
-
 def get_market_cap_usd(data):
-    market_cap_usd = safe_float(data.get("marketCapUsd"), 0)
-    if market_cap_usd > 0:
-        return market_cap_usd
+    mc_usd = safe_float(data.get("marketCapUsd"), 0)
+    if mc_usd > 0:
+        return mc_usd
 
-    market_cap_sol = safe_float(data.get("marketCapSol"), 0)
-    if market_cap_sol > 0:
-        return market_cap_sol * SOL_USD_ESTIMATE
+    mc_sol = safe_float(data.get("marketCapSol"), 0)
+    if mc_sol > 0:
+        return mc_sol * SOL_USD_ESTIMATE
 
-    market_cap = safe_float(data.get("marketCap"), 0)
-    if market_cap > 0:
-        return market_cap
+    mc = safe_float(data.get("marketCap"), 0)
+    if mc > 0:
+        return mc
 
     return 0
 
@@ -112,7 +99,6 @@ def get_price(data, market_cap):
     if price > 0:
         return price
 
-    # For paper testing we can track percentage movement using market cap.
     return market_cap
 
 
@@ -124,9 +110,78 @@ def get_symbol(data):
     return data.get("symbol") or data.get("ticker") or "UNKNOWN"
 
 
-# ==============================
-# TOKEN TRACKING
-# ==============================
+def current_balance():
+    closed = trade_history.get("closed", [])
+    realised = 0
+
+    for trade in closed:
+        pnl = safe_float(trade.get("final_pnl"), 0)
+        realised += PAPER_BUY_USD * (pnl / 100)
+
+    return STARTING_BALANCE + realised
+
+
+def unrealised_pnl_usd():
+    total = 0
+
+    for trade in open_trades.values():
+        pnl = safe_float(trade.get("current_pnl"), 0)
+        position_percent = safe_float(trade.get("position_percent"), 100)
+        active_size = PAPER_BUY_USD * (position_percent / 100)
+        total += active_size * (pnl / 100)
+
+    return total
+
+
+def print_account_summary(force=False):
+    global last_summary_time
+
+    if not force and now() - last_summary_time < SUMMARY_EVERY_SECONDS:
+        return
+
+    last_summary_time = now()
+
+    closed = trade_history.get("closed", [])
+    wins = [t for t in closed if safe_float(t.get("final_pnl"), 0) > 0]
+    losses = [t for t in closed if safe_float(t.get("final_pnl"), 0) <= 0]
+
+    realised_balance = current_balance()
+    unrealised = unrealised_pnl_usd()
+    total_equity = realised_balance + unrealised
+
+    best = max([safe_float(t.get("final_pnl"), 0) for t in closed], default=0)
+    worst = min([safe_float(t.get("final_pnl"), 0) for t in closed], default=0)
+    win_rate = (len(wins) / len(closed) * 100) if closed else 0
+
+    print("\n========================================")
+    print("📊 PUMP HUNTER PAPER ACCOUNT")
+    print("========================================")
+    print(f"Starting Balance: {money(STARTING_BALANCE)}")
+    print(f"Realised Balance: {money(realised_balance)}")
+    print(f"Unrealised P&L: {money(unrealised)}")
+    print(f"Estimated Equity: {money(total_equity)}")
+    print("")
+    print(f"Open Trades: {len(open_trades)}")
+    print(f"Closed Trades: {len(closed)}")
+    print(f"Wins: {len(wins)}")
+    print(f"Losses: {len(losses)}")
+    print(f"Win Rate: {win_rate:.1f}%")
+    print(f"Best Trade: {pct(best)}")
+    print(f"Worst Trade: {pct(worst)}")
+
+    if open_trades:
+        print("")
+        print("Open Positions:")
+        for trade in open_trades.values():
+            print(
+                f"- {trade['symbol']} | "
+                f"{pct(trade.get('current_pnl', 0))} | "
+                f"Peak {pct(trade.get('highest_pnl', 0))} | "
+                f"Size {trade.get('position_percent', 100)}%"
+            )
+
+    print("========================================\n")
+
 
 def prune_tokens():
     if len(tokens) <= MAX_TRACKED_TOKENS:
@@ -136,7 +191,6 @@ def prune_tokens():
 
     for token in sorted_tokens[:100]:
         mint = token["mint"]
-
         if mint not in open_trades:
             tokens.pop(mint, None)
 
@@ -166,9 +220,6 @@ def create_or_update_token(data):
             "sell_streak": 0,
             "subscribed": False,
         }
-
-        print(f"👀 Tracking: {tokens[mint]['name']} ({tokens[mint]['symbol']}) | {mint}")
-
         prune_tokens()
 
     token = tokens[mint]
@@ -198,24 +249,16 @@ def create_or_update_token(data):
     return token
 
 
-# ==============================
-# PAPER TRADING
-# ==============================
-
 def paper_buy(token):
     mint = token["mint"]
 
-    if mint in open_trades:
-        return
-
-    if mint in already_traded:
+    if mint in open_trades or mint in already_traded:
         return
 
     if len(open_trades) >= MAX_OPEN_TRADES:
         return
 
     entry_price = token.get("last_price") or token.get("market_cap")
-
     if entry_price <= 0:
         return
 
@@ -232,6 +275,7 @@ def paper_buy(token):
         "initial_taken": False,
         "highest_pnl": 0,
         "lowest_pnl": 0,
+        "current_pnl": 0,
         "status": "OPEN",
         "buys_at_entry": token["buys"],
         "sells_at_entry": token["sells"],
@@ -243,24 +287,22 @@ def paper_buy(token):
     trade_history.setdefault("opened", []).append(trade.copy())
     save_history()
 
-    print("\n")
-    print("########################################")
+    print("\n########################################")
     print("🟢 PAPER BUY OPENED")
     print("########################################")
     print(f"Token: {token['name']} ({token['symbol']})")
-    print(f"Mint: {mint}")
     print(f"Age: {trade['entry_age']}s")
     print(f"Entry Market Cap: {money(token['market_cap'])}")
     print(f"Buys/Sells at Entry: {token['buys']} / {token['sells']}")
-    print(f"Paper Size: ${PAPER_BUY_USD}")
+    print(f"Paper Size: {money(PAPER_BUY_USD)}")
     print("Rule: sell 50% at +100%, moonbag rides")
-    print("########################################")
-    print("\n")
+    print("########################################\n")
+
+    print_account_summary(force=True)
 
 
 def close_trade(mint, reason, pnl):
     trade = open_trades.pop(mint, None)
-
     if not trade:
         return
 
@@ -272,21 +314,21 @@ def close_trade(mint, reason, pnl):
     trade_history.setdefault("closed", []).append(trade)
     save_history()
 
-    print("\n")
-    print("########################################")
+    print("\n########################################")
     print("🔴 PAPER TRADE CLOSED")
     print("########################################")
     print(f"Token: {trade['name']} ({trade['symbol']})")
     print(f"Reason: {reason}")
-    print(f"P&L: {percent(pnl)}")
-    print("########################################")
-    print("\n")
+    print(f"P&L: {pct(pnl)}")
+    print("########################################\n")
+
+    print_account_summary(force=True)
 
 
 def update_open_trade(token):
     mint = token["mint"]
-
     trade = open_trades.get(mint)
+
     if not trade:
         return
 
@@ -298,6 +340,7 @@ def update_open_trade(token):
 
     pnl = ((current - entry) / entry) * 100
 
+    trade["current_pnl"] = round(pnl, 2)
     trade["highest_pnl"] = max(trade.get("highest_pnl", 0), pnl)
     trade["lowest_pnl"] = min(trade.get("lowest_pnl", 0), pnl)
 
@@ -309,26 +352,21 @@ def update_open_trade(token):
         trade["initial_taken"] = True
         trade["position_percent"] = 50
 
-        print("\n")
-        print("########################################")
+        print("\n########################################")
         print("✅ INITIAL CAPITAL RECOVERED")
         print("########################################")
         print(f"Token: {trade['name']} ({trade['symbol']})")
-        print(f"P&L: {percent(pnl)}")
+        print(f"P&L: {pct(pnl)}")
         print("Sold 50% paper position. Remaining 50% is moonbag.")
-        print("########################################")
-        print("\n")
+        print("########################################\n")
+
+        print_account_summary(force=True)
 
     if trade.get("initial_taken"):
         trailing_stop = trade["highest_pnl"] - MOONBAG_TRAIL
-
         if pnl <= trailing_stop:
             close_trade(mint, "TRAILING STOP AFTER MOONBAG", pnl)
 
-
-# ==============================
-# EVALUATION LOOP
-# ==============================
 
 def qualifies_for_entry(token):
     age = now() - token["created_at"]
@@ -343,10 +381,7 @@ def qualifies_for_entry(token):
     if len(open_trades) >= MAX_OPEN_TRADES:
         return False
 
-    if age < MIN_ENTRY_AGE:
-        return False
-
-    if age > MAX_ENTRY_AGE:
+    if age < MIN_ENTRY_AGE or age > MAX_ENTRY_AGE:
         return False
 
     if market_cap < MIN_ENTRY_MARKET_CAP:
@@ -362,35 +397,14 @@ async def evaluator_loop():
     while True:
         await asyncio.sleep(EVALUATE_EVERY_SECONDS)
 
-        if not tokens:
-            continue
-
         for token in list(tokens.values()):
             update_open_trade(token)
 
             if qualifies_for_entry(token):
                 paper_buy(token)
 
-        top = sorted(
-            tokens.values(),
-            key=lambda t: t.get("market_cap", 0),
-            reverse=True
-        )[:5]
+        print_account_summary(force=False)
 
-        print("📊 Top tracked:")
-        for token in top:
-            age = now() - token["created_at"]
-            print(
-                f"{token['symbol']} | "
-                f"MC {money(token['market_cap'])} | "
-                f"Age {age}s | "
-                f"B/S {token['buys']}/{token['sells']}"
-            )
-
-
-# ==============================
-# WEBSOCKET
-# ==============================
 
 async def handle_message(message, ws):
     try:
@@ -399,13 +413,11 @@ async def handle_message(message, ws):
         return
 
     token = create_or_update_token(data)
-
     if not token:
         return
 
     if not token["subscribed"]:
         token["subscribed"] = True
-
         try:
             await ws.send(json.dumps({
                 "method": "subscribeTokenTrade",
@@ -417,9 +429,9 @@ async def handle_message(message, ws):
 
 async def main():
     print("========================================")
-    print("🚀 PUMP HUNTER v5 STARTED")
+    print("🚀 PUMP HUNTER v6 STARTED")
     print("========================================")
-    print("DATA COLLECTION MODE")
+    print("CLEAN DASHBOARD MODE")
     print("Paper trading only. No real buying.")
     print("")
     print("Entry Rules:")
@@ -447,7 +459,7 @@ async def main():
                 }))
 
                 print("✅ Connected to PumpPortal")
-                print("Listening for new pump.fun launches...\n")
+                print("Listening silently. Will only print buys, sells and summaries.\n")
 
                 async for message in ws:
                     await handle_message(message, ws)
