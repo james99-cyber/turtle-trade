@@ -30,6 +30,7 @@ def fetch_html_tables(url):
 def load_json_file(path, fallback):
     if not os.path.exists(path):
         return fallback
+
     try:
         with open(path, "r") as file:
             return json.load(file)
@@ -85,21 +86,46 @@ def get_market_tickers():
 
 def get_spy_12m_return():
     try:
-        spy = yf.download("SPY", period="13mo", interval="1d", progress=False, auto_adjust=True)
+        spy = yf.download(
+            "SPY",
+            period="13mo",
+            interval="1d",
+            progress=False,
+            auto_adjust=True
+        )
+
+        if spy.empty:
+            return None
+
         closes = spy["Close"].squeeze()
+
         if len(closes) < 252:
             return None
-        return (float(closes.iloc[-1]) - float(closes.iloc[-252])) / float(closes.iloc[-252])
+
+        start = float(closes.iloc[-252])
+        end = float(closes.iloc[-1])
+
+        if start <= 0:
+            return None
+
+        return (end - start) / start
+
     except Exception as error:
         print(f"Could not calculate SPY return: {error}", flush=True)
         return None
 
 
 def get_price_data(ticker):
-    return yf.download(ticker, period="2y", interval="1d", progress=False, auto_adjust=True)
+    return yf.download(
+        ticker,
+        period="2y",
+        interval="1d",
+        progress=False,
+        auto_adjust=True
+    )
 
 
-def check_prime_turtle_signal(ticker, spy_12m_return, diagnostics):
+def check_prime_turtle_signal(ticker, spy_12m_return, diagnostics, near_prime_candidates):
     data = get_price_data(ticker)
 
     if data.empty or len(data) < 252:
@@ -107,6 +133,7 @@ def check_prime_turtle_signal(ticker, spy_12m_return, diagnostics):
 
     closes = data["Close"].squeeze()
     highs = data["High"].squeeze()
+    lows = data["Low"].squeeze()
     volumes = data["Volume"].squeeze()
 
     close = float(closes.iloc[-1])
@@ -114,32 +141,43 @@ def check_prime_turtle_signal(ticker, spy_12m_return, diagnostics):
 
     high_55 = float(highs.iloc[-56:-1].max())
     high_52w = float(highs.iloc[-252:].max())
+
     ma_200 = float(closes.iloc[-200:].mean())
     ma_50 = float(closes.iloc[-50:].mean())
 
     avg_volume_20 = float(volumes.iloc[-20:].mean())
     today_volume = float(volumes.iloc[-1])
 
+    # 1. Turtle System 2 entry: 55-day breakout
     if close <= high_55:
         return None
+
     diagnostics["55_day_breakout"] += 1
 
+    # 2. Long-term trend confirmation
     if close <= ma_200:
         return None
+
     diagnostics["above_200_ma"] += 1
 
+    # 3. Medium-term trend confirmation
     if close <= ma_50:
         return None
+
     diagnostics["above_50_ma"] += 1
 
+    # 4. Near or at 52-week high
     if close < high_52w * 0.99:
         return None
+
     diagnostics["near_52_week_high"] += 1
 
+    # 5. Relative strength versus S&P 500
     if spy_12m_return is None:
         return None
 
     stock_start = float(closes.iloc[-252])
+
     if stock_start <= 0:
         return None
 
@@ -148,20 +186,33 @@ def check_prime_turtle_signal(ticker, spy_12m_return, diagnostics):
 
     if rs_diff < 0.15:
         return None
+
     diagnostics["rs_above_15"] += 1
 
+    # 6. Volume confirmation
     if avg_volume_20 <= 0:
         return None
 
     volume_ratio = today_volume / avg_volume_20
+    rounded_volume_ratio = round(volume_ratio, 2)
 
     if volume_ratio < 1.5:
+        near_prime_candidates.append({
+            "ticker": ticker,
+            "volume_ratio": rounded_volume_ratio,
+            "daily_close": round(close, 2),
+            "breakout_level": round(high_55, 2),
+            "rs_vs_spy": round(rs_diff * 100, 1),
+            "candle_date": candle_date,
+        })
         return None
+
     diagnostics["volume_above_1_5"] += 1
 
     return {
         "ticker": ticker,
         "type": "PRIME_TURTLE_BUY",
+        "rule": "System 2 55-day breakout with Prime filters",
         "entry_date": candle_date,
         "entry_price": round(close, 2),
         "daily_close": round(close, 2),
@@ -170,7 +221,7 @@ def check_prime_turtle_signal(ticker, spy_12m_return, diagnostics):
         "ma_50": round(ma_50, 2),
         "high_52w": round(high_52w, 2),
         "rs_vs_spy": round(rs_diff * 100, 1),
-        "volume_ratio": round(volume_ratio, 2),
+        "volume_ratio": rounded_volume_ratio,
     }
 
 
@@ -269,9 +320,42 @@ def print_prime_signal(signal):
     print("", flush=True)
 
 
+def print_near_prime_candidates(near_prime_candidates):
+    print("===================================", flush=True)
+    print("🚧 NEAR PRIME CANDIDATES", flush=True)
+    print("===================================", flush=True)
+
+    if not near_prime_candidates:
+        print("No near-prime candidates.", flush=True)
+        print("===================================", flush=True)
+        return
+
+    near_prime_candidates.sort(
+        key=lambda candidate: candidate["volume_ratio"],
+        reverse=True
+    )
+
+    for candidate in near_prime_candidates[:5]:
+        print("", flush=True)
+        print(candidate["ticker"], flush=True)
+        print("✓ 55-day breakout", flush=True)
+        print("✓ Above 200 MA", flush=True)
+        print("✓ Above 50 MA", flush=True)
+        print("✓ Near 52-week high", flush=True)
+        print("✓ RS > 15%", flush=True)
+        print(
+            f"✗ Volume {candidate['volume_ratio']}x "
+            f"(need 1.50x)",
+            flush=True
+        )
+
+    print("", flush=True)
+    print("===================================", flush=True)
+
+
 def print_paper_trade_summary(paper_trades):
-    open_trades = [t for t in paper_trades if t["status"] == "OPEN"]
-    closed_trades = [t for t in paper_trades if t["status"] == "CLOSED"]
+    open_trades = [trade for trade in paper_trades if trade["status"] == "OPEN"]
+    closed_trades = [trade for trade in paper_trades if trade["status"] == "CLOSED"]
 
     print("===================================", flush=True)
     print("📊 PRIME TURTLE PAPER TRADES", flush=True)
@@ -279,13 +363,19 @@ def print_paper_trade_summary(paper_trades):
     print(f"Closed trades:     {len(closed_trades)}", flush=True)
 
     if open_trades:
-        avg_open_return = sum(t.get("return_percent", 0) for t in open_trades) / len(open_trades)
+        avg_open_return = sum(trade.get("return_percent", 0) for trade in open_trades) / len(open_trades)
         print(f"Avg open return:   {round(avg_open_return, 2)}%", flush=True)
 
     if closed_trades:
-        winners = [t for t in closed_trades if t.get("final_return_percent", 0) > 0]
+        winners = [
+            trade for trade in closed_trades
+            if trade.get("final_return_percent", 0) > 0
+        ]
         win_rate = (len(winners) / len(closed_trades)) * 100
-        avg_closed_return = sum(t.get("final_return_percent", 0) for t in closed_trades) / len(closed_trades)
+        avg_closed_return = sum(
+            trade.get("final_return_percent", 0)
+            for trade in closed_trades
+        ) / len(closed_trades)
 
         print(f"Win rate:          {round(win_rate, 1)}%", flush=True)
         print(f"Avg closed return: {round(avg_closed_return, 2)}%", flush=True)
@@ -293,6 +383,7 @@ def print_paper_trade_summary(paper_trades):
     if open_trades:
         print("-----------------------------------", flush=True)
         print("Open positions:", flush=True)
+
         for trade in open_trades:
             print(
                 f"{trade['ticker']} | Entry {trade['entry_price']} | "
@@ -341,6 +432,7 @@ def run_scan():
         "volume_above_1_5": 0,
     }
 
+    near_prime_candidates = []
     prime_signals = []
     new_prime_signals = []
     new_paper_trades = 0
@@ -349,7 +441,12 @@ def run_scan():
 
     for ticker in tickers:
         try:
-            signal = check_prime_turtle_signal(ticker, spy_12m_return, diagnostics)
+            signal = check_prime_turtle_signal(
+                ticker,
+                spy_12m_return,
+                diagnostics,
+                near_prime_candidates
+            )
 
             if signal is None:
                 time.sleep(0.1)
@@ -393,12 +490,19 @@ def run_scan():
     if len(prime_signals) == 0:
         print("No PRIME Turtle signals found this scan.", flush=True)
 
+    print_near_prime_candidates(near_prime_candidates)
     print_paper_trade_summary(paper_trades)
 
 
 def seconds_until_next_scan():
     now = datetime.now(timezone.utc)
-    target = now.replace(hour=22, minute=15, second=0, microsecond=0)
+
+    target = now.replace(
+        hour=22,
+        minute=15,
+        second=0,
+        microsecond=0
+    )
 
     if now >= target:
         target = target + timedelta(days=1)
