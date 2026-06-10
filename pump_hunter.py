@@ -33,8 +33,12 @@ MAX_TRACKED_TOKENS = 200
 
 SOL_USD_ESTIMATE = 150
 
+PRINT_RAW_MESSAGES = True
+RAW_MESSAGE_LIMIT = 25
+
 tokens = {}
 open_trades = {}
+raw_messages_printed = 0
 
 
 # ==============================
@@ -107,25 +111,27 @@ def get_price(data, market_cap):
     if price > 0:
         return price
 
-    # Fallback for paper trading:
-    # using market cap as a tracking value still gives us % movement.
     return market_cap
 
 
 def get_token_name(data):
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+
     return (
         data.get("name")
         or data.get("tokenName")
-        or data.get("metadata", {}).get("name")
+        or metadata.get("name")
         or "Unknown"
     )
 
 
 def get_token_symbol(data):
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+
     return (
         data.get("symbol")
         or data.get("ticker")
-        or data.get("metadata", {}).get("symbol")
+        or metadata.get("symbol")
         or "UNKNOWN"
     )
 
@@ -144,7 +150,6 @@ def calculate_score(token):
     score = 0
     reasons = []
 
-    # Age scoring
     if MIN_AGE_SECONDS <= age <= 180:
         score += 25
         reasons.append("ideal early age")
@@ -155,7 +160,6 @@ def calculate_score(token):
         score += 5
         reasons.append("waiting for confirmation")
 
-    # Trade activity
     if trade_count >= 50:
         score += 20
         reasons.append("very strong trade activity")
@@ -166,7 +170,6 @@ def calculate_score(token):
         score += 10
         reasons.append("activity building")
 
-    # Buy pressure
     if sells == 0 and buys >= 10:
         score += 25
         reasons.append("buys with no sells")
@@ -182,7 +185,6 @@ def calculate_score(token):
             score += 8
             reasons.append("positive buy pressure")
 
-    # Market cap
     if MIN_MARKET_CAP <= market_cap <= 75_000:
         score += 20
         reasons.append("low early market cap")
@@ -190,12 +192,10 @@ def calculate_score(token):
         score += 12
         reasons.append("acceptable market cap")
 
-    # Buy streak
     if token.get("buy_streak", 0) >= 5:
         score += 10
         reasons.append("buy streak")
 
-    # Creator safety placeholder
     if not token.get("creator_sold", False):
         score += 10
         reasons.append("no creator sell detected")
@@ -323,6 +323,22 @@ def print_candidate(token, level):
     print("===================================\n")
 
 
+def print_raw_message(data):
+    global raw_messages_printed
+
+    if not PRINT_RAW_MESSAGES:
+        return
+
+    if raw_messages_printed >= RAW_MESSAGE_LIMIT:
+        return
+
+    raw_messages_printed += 1
+
+    print("\n========== RAW PUMPPORTAL MESSAGE ==========")
+    print(json.dumps(data)[:1000])
+    print("===========================================\n")
+
+
 # ==============================
 # TOKEN MANAGEMENT
 # ==============================
@@ -422,6 +438,8 @@ async def handle_message(message, ws):
     except Exception:
         return
 
+    print_raw_message(data)
+
     mint = data.get("mint")
     if not mint:
         return
@@ -477,10 +495,11 @@ async def handle_message(message, ws):
 
 async def main():
     print("===================================")
-    print("🚀 PUMP HUNTER v3 STARTED")
+    print("🚀 PUMP HUNTER v3 DEBUG STARTED")
     print("===================================")
     print("Paper trading only. No real buying.")
     print("Live pump.fun launch + trade tracking.")
+    print("DEBUG MODE: printing first raw PumpPortal messages.")
     print("Rules:")
     print(f"- Wait minimum {MIN_AGE_SECONDS}s")
     print(f"- Entry score >= {ENTRY_SCORE}")
