@@ -4,4 +4,3 @@ requests
 lxml
 html5lib
 websockets
-requests
