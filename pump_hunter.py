@@ -93,18 +93,6 @@ def get_market_cap_usd(data):
     return 0
 
 
-def get_price(data, market_cap):
-    price_usd = safe_float(data.get("priceUsd"), 0)
-    if price_usd > 0:
-        return price_usd
-
-    price = safe_float(data.get("price"), 0)
-    if price > 0:
-        return price
-
-    return market_cap
-
-
 def get_name(data):
     return data.get("name") or data.get("tokenName") or "Unknown"
 
@@ -157,7 +145,8 @@ def print_account_summary(force=False):
     print("\n========================================")
     print("📊 PUMP HUNTER PAPER ACCOUNT")
     print("========================================")
-    print(f"Mode: NEWBORN BASKET")
+    print("Mode: NEWBORN BASKET")
+    print("P&L Method: MARKET CAP TRACKING")
     print(f"Starting Balance: {money(STARTING_BALANCE)}")
     print(f"Realised Balance: {money(realised_balance)}")
     print(f"Unrealised P&L: {money(unrealised)}")
@@ -187,6 +176,8 @@ def print_account_summary(force=False):
                 f"Now {pct(trade.get('current_pnl', 0))} | "
                 f"Peak {pct(trade.get('highest_pnl', 0))} | "
                 f"Low {pct(trade.get('lowest_pnl', 0))} | "
+                f"Entry MC {money(trade.get('entry_market_cap', 0))} | "
+                f"Current MC {money(trade.get('current_market_cap', 0))} | "
                 f"Size {trade.get('position_percent', 100)}%"
             )
 
@@ -263,7 +254,6 @@ def create_or_update_token(data):
         return None
 
     market_cap = get_market_cap_usd(data)
-    price = get_price(data, market_cap)
 
     if mint not in tokens:
         tokens[mint] = {
@@ -273,7 +263,6 @@ def create_or_update_token(data):
             "created_at": now(),
             "market_cap": market_cap,
             "first_market_cap": market_cap,
-            "last_price": price,
             "highest_market_cap": market_cap,
             "lowest_market_cap": market_cap if market_cap > 0 else None,
             "subscribed": False,
@@ -291,9 +280,6 @@ def create_or_update_token(data):
         else:
             token["lowest_market_cap"] = min(token["lowest_market_cap"], market_cap)
 
-    if price > 0:
-        token["last_price"] = price
-
     return token
 
 
@@ -306,9 +292,9 @@ def paper_buy(token):
     if len(open_trades) >= MAX_OPEN_TRADES:
         return
 
-    entry_price = token.get("last_price") or token.get("market_cap")
+    entry_market_cap = safe_float(token.get("market_cap"), 0)
 
-    if entry_price <= 0:
+    if entry_market_cap <= 0:
         return
 
     trade = {
@@ -317,8 +303,8 @@ def paper_buy(token):
         "mint": mint,
         "entry_time": now(),
         "entry_age": now() - token["created_at"],
-        "entry_price": entry_price,
-        "entry_market_cap": token["market_cap"],
+        "entry_market_cap": entry_market_cap,
+        "current_market_cap": entry_market_cap,
         "paper_buy_usd": PAPER_BUY_USD,
         "position_percent": 100,
         "initial_taken": False,
@@ -340,9 +326,10 @@ def paper_buy(token):
     print(f"Token: {token['name']} ({token['symbol']})")
     print(f"Mint: {mint}")
     print(f"Age: {trade['entry_age']}s")
-    print(f"Entry Market Cap: {money(token['market_cap'])}")
+    print(f"Entry Market Cap: {money(entry_market_cap)}")
     print(f"Paper Size: {money(PAPER_BUY_USD)}")
     print("Strategy: newborn basket")
+    print("P&L Method: market cap movement")
     print("Rule: sell 50% at +100%, moonbag rides")
     print("########################################\n")
 
@@ -381,14 +368,15 @@ def update_open_trade(token):
     if not trade:
         return
 
-    entry = safe_float(trade["entry_price"], 0)
-    current = safe_float(token.get("last_price"), 0)
+    entry_mc = safe_float(trade.get("entry_market_cap"), 0)
+    current_mc = safe_float(token.get("market_cap"), 0)
 
-    if entry <= 0 or current <= 0:
+    if entry_mc <= 0 or current_mc <= 0:
         return
 
-    pnl = ((current - entry) / entry) * 100
+    pnl = ((current_mc - entry_mc) / entry_mc) * 100
 
+    trade["current_market_cap"] = current_mc
     trade["current_pnl"] = round(pnl, 2)
     trade["highest_pnl"] = max(trade.get("highest_pnl", 0), pnl)
     trade["lowest_pnl"] = min(trade.get("lowest_pnl", 0), pnl)
@@ -406,6 +394,8 @@ def update_open_trade(token):
         print("########################################")
         print(f"Token: {trade['name']} ({trade['symbol']})")
         print(f"P&L: {pct(pnl)}")
+        print(f"Entry MC: {money(entry_mc)}")
+        print(f"Current MC: {money(current_mc)}")
         print("Sold 50% paper position. Remaining 50% is moonbag.")
         print("########################################\n")
 
@@ -420,7 +410,7 @@ def update_open_trade(token):
 
 def qualifies_for_entry(token):
     age = now() - token["created_at"]
-    market_cap = token.get("market_cap", 0)
+    market_cap = safe_float(token.get("market_cap"), 0)
 
     if token["mint"] in already_traded:
         return False
@@ -491,7 +481,7 @@ async def handle_message(message, ws):
 
 async def main():
     print("========================================")
-    print("🚀 PUMP HUNTER v10 NEWBORN BASKET STARTED")
+    print("🚀 PUMP HUNTER v11 MC PNL STARTED")
     print("========================================")
     print("Paper trading only. No real buying.")
     print("")
@@ -505,6 +495,9 @@ async def main():
     print(f"- Stop Loss: {STOP_LOSS}%")
     print(f"- Sell 50% at: +{TAKE_INITIAL_AT}%")
     print(f"- Moonbag Trail: {MOONBAG_TRAIL}%")
+    print("")
+    print("P&L Method:")
+    print("- Uses market cap movement instead of token price")
     print("========================================\n")
 
     asyncio.create_task(evaluator_loop())
