@@ -12,11 +12,11 @@ STARTING_BALANCE = 1000
 PAPER_BUY_USD = 100
 SOL_USD_ESTIMATE = 150
 
-MIN_ENTRY_AGE = 20
-MAX_ENTRY_AGE = 180
-MIN_ENTRY_MARKET_CAP = 8_000
-MAX_ENTRY_MARKET_CAP = 50_000
-MIN_BUYS_AT_ENTRY = 3
+MIN_ENTRY_AGE = 15
+MAX_ENTRY_AGE = 300
+MIN_ENTRY_MARKET_CAP = 5_000
+MAX_ENTRY_MARKET_CAP = 75_000
+MIN_BUYS_AT_ENTRY = 1
 
 STOP_LOSS = -30
 TAKE_INITIAL_AT = 100
@@ -27,11 +27,13 @@ MAX_TRACKED_TOKENS = 500
 
 EVALUATE_EVERY_SECONDS = 3
 SUMMARY_EVERY_SECONDS = 300
+DIAGNOSTIC_EVERY_SECONDS = 60
 
 tokens = {}
 open_trades = {}
 already_traded = set()
 last_summary_time = 0
+last_diagnostic_time = 0
 
 
 def now():
@@ -187,6 +189,68 @@ def print_account_summary(force=False):
                 f"Size {trade.get('position_percent', 100)}%"
             )
 
+    print("========================================\n")
+
+
+def print_diagnostics(force=False):
+    global last_diagnostic_time
+
+    if not force and now() - last_diagnostic_time < DIAGNOSTIC_EVERY_SECONDS:
+        return
+
+    last_diagnostic_time = now()
+
+    total = len(tokens)
+    active_window = 0
+    mc_window = 0
+    buy_window = 0
+    full_candidates = 0
+
+    examples = []
+
+    for token in tokens.values():
+        age = now() - token["created_at"]
+        mc = token.get("market_cap", 0)
+        buys = token.get("buys", 0)
+        sells = token.get("sells", 0)
+
+        in_age = MIN_ENTRY_AGE <= age <= MAX_ENTRY_AGE
+        in_mc = MIN_ENTRY_MARKET_CAP <= mc <= MAX_ENTRY_MARKET_CAP
+        has_buys = buys >= MIN_BUYS_AT_ENTRY
+        buy_pressure = buys > sells
+
+        if in_age:
+            active_window += 1
+
+        if in_age and in_mc:
+            mc_window += 1
+
+        if in_age and in_mc and has_buys:
+            buy_window += 1
+
+        if in_age and in_mc and has_buys and buy_pressure:
+            full_candidates += 1
+
+        if len(examples) < 5 and in_age:
+            examples.append(
+                f"{token['symbol']} | Age {age}s | MC {money(mc)} | B/S {buys}/{sells}"
+            )
+
+    print("\n========================================")
+    print("🔎 PUMP HUNTER DIAGNOSTICS")
+    print("========================================")
+    print(f"Tracked Tokens: {total}")
+    print(f"In Age Window: {active_window}")
+    print(f"In Age + MC Window: {mc_window}")
+    print(f"In Age + MC + Buy Window: {buy_window}")
+    print(f"Full Candidates: {full_candidates}")
+    print("")
+    print("Example Tokens:")
+    if examples:
+        for example in examples:
+            print(f"- {example}")
+    else:
+        print("- No active examples right now")
     print("========================================\n")
 
 
@@ -405,6 +469,13 @@ def qualifies_for_entry(token):
     if buys <= sells:
         return False
 
+    print(
+        f"✅ CANDIDATE {token['symbol']} | "
+        f"Age {age}s | "
+        f"MC {money(market_cap)} | "
+        f"B/S {buys}/{sells}"
+    )
+
     return True
 
 
@@ -419,6 +490,7 @@ async def evaluator_loop():
                 paper_buy(token)
 
         print_account_summary(force=False)
+        print_diagnostics(force=False)
 
 
 async def handle_message(message, ws):
@@ -444,9 +516,8 @@ async def handle_message(message, ws):
 
 async def main():
     print("========================================")
-    print("🚀 PUMP HUNTER v7 STARTED")
+    print("🚀 PUMP HUNTER v8 DIAGNOSTIC STARTED")
     print("========================================")
-    print("CLEAN DASHBOARD MODE")
     print("Paper trading only. No real buying.")
     print("")
     print("Entry Rules:")
@@ -455,6 +526,10 @@ async def main():
     print(f"- Minimum Buys: {MIN_BUYS_AT_ENTRY}")
     print("- Must have more buys than sells")
     print(f"- Max Open Trades: {MAX_OPEN_TRADES}")
+    print("")
+    print("Diagnostics:")
+    print(f"- Prints every {DIAGNOSTIC_EVERY_SECONDS}s")
+    print("- Shows why trades are not triggering")
     print("")
     print("Exit Rules:")
     print(f"- Stop Loss: {STOP_LOSS}%")
@@ -476,7 +551,7 @@ async def main():
                 }))
 
                 print("✅ Connected to PumpPortal")
-                print("Listening silently. Will only print buys, sells and summaries.\n")
+                print("Listening silently. Will print summaries, diagnostics and trades.\n")
 
                 async for message in ws:
                     await handle_message(message, ws)
