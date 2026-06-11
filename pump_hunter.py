@@ -7,7 +7,7 @@ import requests
 import websockets
 
 PUMP_WS = "wss://pumpportal.fun/api/data"
-TRADES_FILE = Path("pump_trades.json")
+TRADES_FILE = Path("pump_trades_v13.json")
 
 STARTING_BALANCE = 1000
 PAPER_BUY_USD = 25
@@ -28,6 +28,9 @@ MAX_TRACKED_TOKENS = 600
 EVALUATE_EVERY_SECONDS = 60
 SUMMARY_EVERY_SECONDS = 300
 DIAGNOSTIC_EVERY_SECONDS = 300
+
+MAX_REALISTIC_PNL = 10_000
+MAX_REALISTIC_MC_MULTIPLE = 100
 
 tokens = {}
 open_trades = {}
@@ -120,8 +123,12 @@ def get_dex_market_cap(mint):
             key=lambda p: safe_float(p.get("liquidity", {}).get("usd"), 0)
         )
 
+        liquidity = safe_float(best_pair.get("liquidity", {}).get("usd"), 0)
         market_cap = safe_float(best_pair.get("marketCap"), 0)
         fdv = safe_float(best_pair.get("fdv"), 0)
+
+        if liquidity <= 0:
+            return None
 
         if market_cap > 0:
             return market_cap
@@ -156,6 +163,30 @@ def unrealised_pnl_usd():
     return total
 
 
+def print_top_closed_trades():
+    closed = trade_history.get("closed", [])
+
+    if not closed:
+        return
+
+    winners = sorted(
+        closed,
+        key=lambda t: safe_float(t.get("final_pnl"), 0),
+        reverse=True
+    )[:5]
+
+    print("")
+    print("Top Closed Trades:")
+
+    for trade in winners:
+        print(
+            f"- {trade.get('symbol')} | "
+            f"{pct(safe_float(trade.get('final_pnl'), 0))} | "
+            f"Entry MC {money(trade.get('entry_market_cap', 0))} | "
+            f"Exit MC {money(trade.get('exit_market_cap', 0))}"
+        )
+
+
 def print_account_summary(force=False):
     global last_summary_time
 
@@ -181,6 +212,7 @@ def print_account_summary(force=False):
     print("========================================")
     print("Mode: NEWBORN BASKET")
     print("Tracker: DEXSCREENER BACKUP")
+    print("History File: pump_trades_v13.json")
     print(f"Starting Balance: {money(STARTING_BALANCE)}")
     print(f"Realised Balance: {money(realised_balance)}")
     print(f"Unrealised P&L: {money(unrealised)}")
@@ -194,6 +226,8 @@ def print_account_summary(force=False):
     print(f"Best Trade: {pct(best)}")
     print(f"Worst Trade: {pct(worst)}")
 
+    print_top_closed_trades()
+
     if open_trades:
         print("")
         print("Open Positions:")
@@ -202,7 +236,7 @@ def print_account_summary(force=False):
             open_trades.values(),
             key=lambda t: safe_float(t.get("current_pnl"), 0),
             reverse=True
-        )
+        )[:10]
 
         for trade in sorted_trades:
             print(
@@ -229,7 +263,6 @@ def print_diagnostics(force=False):
     total = len(tokens)
     active_window = 0
     mc_window = 0
-    full_candidates = 0
     examples = []
 
     for token in tokens.values():
@@ -244,7 +277,6 @@ def print_diagnostics(force=False):
 
         if in_age and in_mc:
             mc_window += 1
-            full_candidates += 1
 
         if len(examples) < 5 and in_age:
             examples.append(f"{token['symbol']} | Age {age}s | MC {money(mc)}")
@@ -255,7 +287,7 @@ def print_diagnostics(force=False):
     print(f"Tracked Tokens: {total}")
     print(f"In Age Window: {active_window}")
     print(f"In Age + MC Window: {mc_window}")
-    print(f"Full Candidates: {full_candidates}")
+    print(f"Open Trades: {len(open_trades)}")
     print("")
     print("Example Tokens:")
 
@@ -365,7 +397,6 @@ def paper_buy(token):
     print(f"Paper Size: {money(PAPER_BUY_USD)}")
     print("Strategy: newborn basket")
     print("Tracker: DexScreener backup")
-    print("Rule: sell 50% at +100%, moonbag rides")
     print("########################################\n")
 
     print_account_summary(force=True)
@@ -380,6 +411,7 @@ def close_trade(mint, reason, pnl):
     trade["exit_time"] = now()
     trade["exit_reason"] = reason
     trade["final_pnl"] = round(pnl, 2)
+    trade["exit_market_cap"] = trade.get("current_market_cap", 0)
     trade["status"] = "CLOSED"
 
     trade_history.setdefault("closed", []).append(trade)
@@ -391,6 +423,8 @@ def close_trade(mint, reason, pnl):
     print(f"Token: {trade['name']} ({trade['symbol']})")
     print(f"Reason: {reason}")
     print(f"P&L: {pct(pnl)}")
+    print(f"Entry MC: {money(trade.get('entry_market_cap', 0))}")
+    print(f"Exit MC: {money(trade.get('exit_market_cap', 0))}")
     print("########################################\n")
 
     print_account_summary(force=True)
@@ -404,7 +438,21 @@ def update_trade_from_market_cap(trade, current_market_cap):
     if entry_mc <= 0 or current_mc <= 0:
         return
 
+    if current_mc > entry_mc * MAX_REALISTIC_MC_MULTIPLE:
+        print(
+            f"⚠️ Ignoring unrealistic MC spike for {trade['symbol']}: "
+            f"{money(entry_mc)} -> {money(current_mc)}"
+        )
+        return
+
     pnl = ((current_mc - entry_mc) / entry_mc) * 100
+
+    if pnl > MAX_REALISTIC_PNL:
+        print(
+            f"⚠️ Ignoring unrealistic P&L for {trade['symbol']}: "
+            f"{pct(pnl)}"
+        )
+        return
 
     trade["current_market_cap"] = current_mc
     trade["current_pnl"] = round(pnl, 2)
@@ -540,9 +588,14 @@ async def handle_message(message, ws):
 
 async def main():
     print("========================================")
-    print("🚀 PUMP HUNTER v12 DEX TRACKER STARTED")
+    print("🚀 PUMP HUNTER v13 CLEAN RESET STARTED")
     print("========================================")
     print("Paper trading only. No real buying.")
+    print("")
+    print("IMPORTANT:")
+    print("- Uses fresh file pump_trades_v13.json")
+    print("- Ignores unrealistic DexScreener spikes")
+    print("- Prints top closed trades")
     print("")
     print("Entry Rules:")
     print(f"- Age: {MIN_ENTRY_AGE}s to {MAX_ENTRY_AGE}s")
@@ -554,10 +607,6 @@ async def main():
     print(f"- Stop Loss: {STOP_LOSS}%")
     print(f"- Sell 50% at: +{TAKE_INITIAL_AT}%")
     print(f"- Moonbag Trail: {MOONBAG_TRAIL}%")
-    print("")
-    print("Tracker:")
-    print("- PumpPortal for launch discovery")
-    print("- DexScreener for open trade market cap tracking")
     print("========================================\n")
 
     asyncio.create_task(evaluator_loop())
