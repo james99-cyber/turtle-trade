@@ -3,6 +3,7 @@ import json
 import time
 from pathlib import Path
 
+import requests
 import websockets
 
 PUMP_WS = "wss://pumpportal.fun/api/data"
@@ -24,9 +25,9 @@ MOONBAG_TRAIL = 50
 MAX_OPEN_TRADES = 20
 MAX_TRACKED_TOKENS = 600
 
-EVALUATE_EVERY_SECONDS = 3
+EVALUATE_EVERY_SECONDS = 60
 SUMMARY_EVERY_SECONDS = 300
-DIAGNOSTIC_EVERY_SECONDS = 120
+DIAGNOSTIC_EVERY_SECONDS = 300
 
 tokens = {}
 open_trades = {}
@@ -66,7 +67,6 @@ def load_history():
                 return data
         except Exception:
             pass
-
     return {"opened": [], "closed": []}
 
 
@@ -99,6 +99,40 @@ def get_name(data):
 
 def get_symbol(data):
     return data.get("symbol") or data.get("ticker") or "UNKNOWN"
+
+
+def get_dex_market_cap(mint):
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+        response = requests.get(url, timeout=10)
+
+        if response.status_code != 200:
+            return None
+
+        data = response.json()
+        pairs = data.get("pairs", [])
+
+        if not pairs:
+            return None
+
+        best_pair = max(
+            pairs,
+            key=lambda p: safe_float(p.get("liquidity", {}).get("usd"), 0)
+        )
+
+        market_cap = safe_float(best_pair.get("marketCap"), 0)
+        fdv = safe_float(best_pair.get("fdv"), 0)
+
+        if market_cap > 0:
+            return market_cap
+
+        if fdv > 0:
+            return fdv
+
+    except Exception:
+        return None
+
+    return None
 
 
 def current_balance():
@@ -146,7 +180,7 @@ def print_account_summary(force=False):
     print("📊 PUMP HUNTER PAPER ACCOUNT")
     print("========================================")
     print("Mode: NEWBORN BASKET")
-    print("P&L Method: MARKET CAP TRACKING")
+    print("Tracker: DEXSCREENER BACKUP")
     print(f"Starting Balance: {money(STARTING_BALANCE)}")
     print(f"Realised Balance: {money(realised_balance)}")
     print(f"Unrealised P&L: {money(unrealised)}")
@@ -210,14 +244,10 @@ def print_diagnostics(force=False):
 
         if in_age and in_mc:
             mc_window += 1
-
-        if in_age and in_mc:
             full_candidates += 1
 
         if len(examples) < 5 and in_age:
-            examples.append(
-                f"{token['symbol']} | Age {age}s | MC {money(mc)}"
-            )
+            examples.append(f"{token['symbol']} | Age {age}s | MC {money(mc)}")
 
     print("\n========================================")
     print("🔎 PUMP HUNTER DIAGNOSTICS")
@@ -228,11 +258,13 @@ def print_diagnostics(force=False):
     print(f"Full Candidates: {full_candidates}")
     print("")
     print("Example Tokens:")
+
     if examples:
         for example in examples:
             print(f"- {example}")
     else:
         print("- No active examples right now")
+
     print("========================================\n")
 
 
@@ -244,6 +276,7 @@ def prune_tokens():
 
     for token in sorted_tokens[:100]:
         mint = token["mint"]
+
         if mint not in open_trades:
             tokens.pop(mint, None)
 
@@ -267,6 +300,7 @@ def create_or_update_token(data):
             "lowest_market_cap": market_cap if market_cap > 0 else None,
             "subscribed": False,
         }
+
         prune_tokens()
 
     token = tokens[mint]
@@ -305,6 +339,7 @@ def paper_buy(token):
         "entry_age": now() - token["created_at"],
         "entry_market_cap": entry_market_cap,
         "current_market_cap": entry_market_cap,
+        "dex_seen": False,
         "paper_buy_usd": PAPER_BUY_USD,
         "position_percent": 100,
         "initial_taken": False,
@@ -329,7 +364,7 @@ def paper_buy(token):
     print(f"Entry Market Cap: {money(entry_market_cap)}")
     print(f"Paper Size: {money(PAPER_BUY_USD)}")
     print("Strategy: newborn basket")
-    print("P&L Method: market cap movement")
+    print("Tracker: DexScreener backup")
     print("Rule: sell 50% at +100%, moonbag rides")
     print("########################################\n")
 
@@ -361,15 +396,10 @@ def close_trade(mint, reason, pnl):
     print_account_summary(force=True)
 
 
-def update_open_trade(token):
-    mint = token["mint"]
-    trade = open_trades.get(mint)
-
-    if not trade:
-        return
-
+def update_trade_from_market_cap(trade, current_market_cap):
+    mint = trade["mint"]
     entry_mc = safe_float(trade.get("entry_market_cap"), 0)
-    current_mc = safe_float(token.get("market_cap"), 0)
+    current_mc = safe_float(current_market_cap, 0)
 
     if entry_mc <= 0 or current_mc <= 0:
         return
@@ -380,6 +410,12 @@ def update_open_trade(token):
     trade["current_pnl"] = round(pnl, 2)
     trade["highest_pnl"] = max(trade.get("highest_pnl", 0), pnl)
     trade["lowest_pnl"] = min(trade.get("lowest_pnl", 0), pnl)
+
+    print(
+        f"📈 {trade['symbol']} | "
+        f"MC {money(entry_mc)} -> {money(current_mc)} | "
+        f"P&L {pct(pnl)}"
+    )
 
     if pnl <= STOP_LOSS:
         close_trade(mint, "STOP LOSS", pnl)
@@ -406,6 +442,29 @@ def update_open_trade(token):
 
         if pnl <= trailing_stop:
             close_trade(mint, "TRAILING STOP AFTER MOONBAG", pnl)
+
+
+def update_open_trade(token):
+    mint = token["mint"]
+    trade = open_trades.get(mint)
+
+    if not trade:
+        return
+
+    live_mc = get_dex_market_cap(mint)
+
+    if live_mc:
+        trade["dex_seen"] = True
+        update_trade_from_market_cap(trade, live_mc)
+        return
+
+    token_mc = safe_float(token.get("market_cap"), 0)
+
+    if token_mc > 0:
+        update_trade_from_market_cap(trade, token_mc)
+        return
+
+    print(f"⚠️ No tracker data yet for {trade['symbol']} | {mint}")
 
 
 def qualifies_for_entry(token):
@@ -481,7 +540,7 @@ async def handle_message(message, ws):
 
 async def main():
     print("========================================")
-    print("🚀 PUMP HUNTER v11 MC PNL STARTED")
+    print("🚀 PUMP HUNTER v12 DEX TRACKER STARTED")
     print("========================================")
     print("Paper trading only. No real buying.")
     print("")
@@ -496,8 +555,9 @@ async def main():
     print(f"- Sell 50% at: +{TAKE_INITIAL_AT}%")
     print(f"- Moonbag Trail: {MOONBAG_TRAIL}%")
     print("")
-    print("P&L Method:")
-    print("- Uses market cap movement instead of token price")
+    print("Tracker:")
+    print("- PumpPortal for launch discovery")
+    print("- DexScreener for open trade market cap tracking")
     print("========================================\n")
 
     asyncio.create_task(evaluator_loop())
