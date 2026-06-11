@@ -12,11 +12,12 @@ STARTING_BALANCE = 1000
 PAPER_BUY_USD = 100
 SOL_USD_ESTIMATE = 150
 
-MIN_ENTRY_AGE = 15
+MIN_ENTRY_AGE = 20
 MAX_ENTRY_AGE = 300
 MIN_ENTRY_MARKET_CAP = 5_000
 MAX_ENTRY_MARKET_CAP = 75_000
-MIN_BUYS_AT_ENTRY = 1
+
+MIN_MARKET_CAP_GROWTH = 20  # percent growth from first seen market cap
 
 STOP_LOSS = -30
 TAKE_INITIAL_AT = 100
@@ -27,7 +28,7 @@ MAX_TRACKED_TOKENS = 500
 
 EVALUATE_EVERY_SECONDS = 3
 SUMMARY_EVERY_SECONDS = 300
-DIAGNOSTIC_EVERY_SECONDS = 60
+DIAGNOSTIC_EVERY_SECONDS = 120
 
 tokens = {}
 open_trades = {}
@@ -192,6 +193,16 @@ def print_account_summary(force=False):
     print("========================================\n")
 
 
+def get_market_cap_growth(token):
+    first_mc = safe_float(token.get("first_market_cap"), 0)
+    current_mc = safe_float(token.get("market_cap"), 0)
+
+    if first_mc <= 0 or current_mc <= 0:
+        return 0
+
+    return ((current_mc - first_mc) / first_mc) * 100
+
+
 def print_diagnostics(force=False):
     global last_diagnostic_time
 
@@ -203,7 +214,7 @@ def print_diagnostics(force=False):
     total = len(tokens)
     active_window = 0
     mc_window = 0
-    buy_window = 0
+    growth_window = 0
     full_candidates = 0
 
     examples = []
@@ -211,13 +222,11 @@ def print_diagnostics(force=False):
     for token in tokens.values():
         age = now() - token["created_at"]
         mc = token.get("market_cap", 0)
-        buys = token.get("buys", 0)
-        sells = token.get("sells", 0)
+        growth = get_market_cap_growth(token)
 
         in_age = MIN_ENTRY_AGE <= age <= MAX_ENTRY_AGE
         in_mc = MIN_ENTRY_MARKET_CAP <= mc <= MAX_ENTRY_MARKET_CAP
-        has_buys = buys >= MIN_BUYS_AT_ENTRY
-        buy_pressure = buys > sells
+        has_growth = growth >= MIN_MARKET_CAP_GROWTH
 
         if in_age:
             active_window += 1
@@ -225,15 +234,15 @@ def print_diagnostics(force=False):
         if in_age and in_mc:
             mc_window += 1
 
-        if in_age and in_mc and has_buys:
-            buy_window += 1
+        if in_age and in_mc and has_growth:
+            growth_window += 1
 
-        if in_age and in_mc and has_buys and buy_pressure:
+        if in_age and in_mc and has_growth:
             full_candidates += 1
 
         if len(examples) < 5 and in_age:
             examples.append(
-                f"{token['symbol']} | Age {age}s | MC {money(mc)} | B/S {buys}/{sells}"
+                f"{token['symbol']} | Age {age}s | MC {money(mc)} | Growth {pct(growth)}"
             )
 
     print("\n========================================")
@@ -242,7 +251,7 @@ def print_diagnostics(force=False):
     print(f"Tracked Tokens: {total}")
     print(f"In Age Window: {active_window}")
     print(f"In Age + MC Window: {mc_window}")
-    print(f"In Age + MC + Buy Window: {buy_window}")
+    print(f"In Age + MC + Growth Window: {growth_window}")
     print(f"Full Candidates: {full_candidates}")
     print("")
     print("Example Tokens:")
@@ -273,7 +282,6 @@ def create_or_update_token(data):
 
     market_cap = get_market_cap_usd(data)
     price = get_price(data, market_cap)
-    tx_type = data.get("txType")
 
     if mint not in tokens:
         tokens[mint] = {
@@ -281,14 +289,11 @@ def create_or_update_token(data):
             "name": get_name(data),
             "symbol": get_symbol(data),
             "created_at": now(),
+            "first_market_cap": market_cap,
             "market_cap": market_cap,
             "last_price": price,
             "highest_market_cap": market_cap,
             "lowest_market_cap": market_cap if market_cap > 0 else None,
-            "buys": 0,
-            "sells": 0,
-            "buy_streak": 0,
-            "sell_streak": 0,
             "subscribed": False,
         }
         prune_tokens()
@@ -307,16 +312,6 @@ def create_or_update_token(data):
     if price > 0:
         token["last_price"] = price
 
-    if tx_type == "buy":
-        token["buys"] += 1
-        token["buy_streak"] += 1
-        token["sell_streak"] = 0
-
-    elif tx_type == "sell":
-        token["sells"] += 1
-        token["sell_streak"] += 1
-        token["buy_streak"] = 0
-
     return token
 
 
@@ -333,6 +328,8 @@ def paper_buy(token):
     if entry_price <= 0:
         return
 
+    growth = get_market_cap_growth(token)
+
     trade = {
         "name": token["name"],
         "symbol": token["symbol"],
@@ -341,6 +338,7 @@ def paper_buy(token):
         "entry_age": now() - token["created_at"],
         "entry_price": entry_price,
         "entry_market_cap": token["market_cap"],
+        "entry_market_cap_growth": round(growth, 2),
         "paper_buy_usd": PAPER_BUY_USD,
         "position_percent": 100,
         "initial_taken": False,
@@ -348,8 +346,6 @@ def paper_buy(token):
         "lowest_pnl": 0,
         "current_pnl": 0,
         "status": "OPEN",
-        "buys_at_entry": token["buys"],
-        "sells_at_entry": token["sells"],
     }
 
     open_trades[mint] = trade
@@ -364,7 +360,7 @@ def paper_buy(token):
     print(f"Token: {token['name']} ({token['symbol']})")
     print(f"Age: {trade['entry_age']}s")
     print(f"Entry Market Cap: {money(token['market_cap'])}")
-    print(f"Buys/Sells at Entry: {token['buys']} / {token['sells']}")
+    print(f"MC Growth: {pct(growth)}")
     print(f"Paper Size: {money(PAPER_BUY_USD)}")
     print("Rule: sell 50% at +100%, moonbag rides")
     print("########################################\n")
@@ -442,8 +438,7 @@ def update_open_trade(token):
 def qualifies_for_entry(token):
     age = now() - token["created_at"]
     market_cap = token.get("market_cap", 0)
-    buys = token.get("buys", 0)
-    sells = token.get("sells", 0)
+    growth = get_market_cap_growth(token)
 
     if token["mint"] in already_traded:
         return False
@@ -463,17 +458,14 @@ def qualifies_for_entry(token):
     if market_cap > MAX_ENTRY_MARKET_CAP:
         return False
 
-    if buys < MIN_BUYS_AT_ENTRY:
-        return False
-
-    if buys <= sells:
+    if growth < MIN_MARKET_CAP_GROWTH:
         return False
 
     print(
         f"✅ CANDIDATE {token['symbol']} | "
         f"Age {age}s | "
         f"MC {money(market_cap)} | "
-        f"B/S {buys}/{sells}"
+        f"Growth {pct(growth)}"
     )
 
     return True
@@ -516,20 +508,15 @@ async def handle_message(message, ws):
 
 async def main():
     print("========================================")
-    print("🚀 PUMP HUNTER v8 DIAGNOSTIC STARTED")
+    print("🚀 PUMP HUNTER v9 MOMENTUM STARTED")
     print("========================================")
     print("Paper trading only. No real buying.")
     print("")
     print("Entry Rules:")
     print(f"- Age: {MIN_ENTRY_AGE}s to {MAX_ENTRY_AGE}s")
     print(f"- Market Cap: {money(MIN_ENTRY_MARKET_CAP)} to {money(MAX_ENTRY_MARKET_CAP)}")
-    print(f"- Minimum Buys: {MIN_BUYS_AT_ENTRY}")
-    print("- Must have more buys than sells")
+    print(f"- Minimum MC Growth: {pct(MIN_MARKET_CAP_GROWTH)}")
     print(f"- Max Open Trades: {MAX_OPEN_TRADES}")
-    print("")
-    print("Diagnostics:")
-    print(f"- Prints every {DIAGNOSTIC_EVERY_SECONDS}s")
-    print("- Shows why trades are not triggering")
     print("")
     print("Exit Rules:")
     print(f"- Stop Loss: {STOP_LOSS}%")
@@ -551,7 +538,7 @@ async def main():
                 }))
 
                 print("✅ Connected to PumpPortal")
-                print("Listening silently. Will print summaries, diagnostics and trades.\n")
+                print("Listening for market cap momentum. Will print candidates and trades.\n")
 
                 async for message in ws:
                     await handle_message(message, ws)
